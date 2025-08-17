@@ -1,0 +1,60 @@
+Certainly. Here is the creative GitHub README in English.
+
+-----
+
+# Project: Professional Go-Kart Telemetry System 🏎️
+
+### Welcome to the World of Data-Driven Racing\!
+
+This is a comprehensive project for building a sophisticated telemetry system for a racing go-kart. The goal is to collect crucial data directly from the track, transmit it wirelessly, and visualize it on a professional dashboard for live monitoring and post-race analysis.
+
+The system is designed to provide a competitive edge, enabling real-time and post-race analysis to optimize the go-kart's performance and racing strategy.
+
+### ✨ Key Features
+
+  - **Accurate Data Acquisition:** Gathers telemetry data (RPM, motor temperature, battery voltage, current, etc.) from the Flipsky controller and BMS via **CAN Bus**.
+  - **Real-time Track Mapping:** Tracks the go-kart's position on the circuit map using **GPS** data.
+  - **Flexible Connectivity:** Utilizes **Wi-Fi** or **GSM** to ensure data is always delivered, no matter where the go-kart is on the track.
+  - **High-Performance Server:** The server, powered by **Rust**, guarantees fast and secure data processing.
+  - **Structured Data Storage:** Stores all time-series data in **InfluxDB** for in-depth analysis.
+  - **Professional Visualization:** Displays data on an interactive **Grafana** or **Node-RED** dashboard, similar to real racing telemetry systems.
+
+### ⚙️ System Architecture
+
+The system operates in three main layers that connect seamlessly:
+
+#### 1\. On-board Unit (Go-kart)
+
+**Role:** The brain behind the wheel.
+**Components:** ESP32, an MCP2515 (CAN module), and a GPS module.
+
+The ESP32 reads data from the CAN Bus and GPS, packages it into a data packet, and sends it to the server using the **MQTT** protocol.
+
+#### 2\. Wireless Communication Layer
+
+**Role:** The data highway.
+**Protocol:** MQTT (TCP/IP)
+**Connection:** Data is sent via **Wi-Fi** (in the pit area) or a **Cellular Network (GSM)** for wider range.
+
+#### 3\. Server Layer (Pit)
+
+**Role:** The data control center.
+**Components:** Rust Server, an MQTT Broker (Mosquitto), and InfluxDB.
+
+The Rust server subscribes to the MQTT topic, processes the data, and stores it in **InfluxDB**. The server also publishes the cleaned data to another topic for real-time consumption by the dashboard.
+
+### 🚀 Getting Started
+
+1.  **Hardware Assembly:** Connect the ESP32, MCP2515, and other sensors according to the wiring diagrams.
+2.  **Firmware Upload:** Upload the `main.cpp` code to your ESP32 after adjusting the network credentials and MQTT topic.
+3.  **Server Setup:** Install and run **Mosquitto** (the MQTT broker), **InfluxDB**, and the provided **Rust** server application.
+4.  **Dashboard Configuration:** Connect **Grafana** to InfluxDB or **Node-RED** to the MQTT broker to create your telemetry visualization.
+
+### 📚 Code Documentation
+
+  - `onboard/`: Contains the **C++** code for the ESP32 firmware.
+  - `server/`: Contains the **Rust** code for the server application.
+
+Feel free to explore the code and follow the comments for further understanding.
+
+Happy data-driven racing\! 🏁
