@@ -1,0 +1,298 @@
+#include <SPI.h>
+#include <mcp_can.h>
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+
+// ---------------------------
+// PIN connections for MCP2515
+// ---------------------------
+const int SPI_CS_PIN = 5;
+const int CAN_INT_PIN = 2; // optional interrupt pin
+
+MCP_CAN CAN(SPI_CS_PIN);
+
+// ---------------------------
+// GSM & MQTT settings
+// ---------------------------
+const char* gsm_apn = "YOUR_GSM_APN"; // Example: "internet" or "telkomsel"
+const char* gsm_user = ""; 
+const char* gsm_pass = ""; 
+const char* mqtt_server = "192.168.1.100";
+const int   mqtt_port = 1883;
+const char* mqtt_user = "NGkartV2"; 
+const char* mqtt_pass = "510512";
+const char* gokart_id = "gokart_01"; 
+
+const char* telemetry_topic = "gokart/telemetry/data";
+const char* command_topic = "gokart/commands/pit_driver";
+
+// Pin for SIM800L
+#define Serial_RX 26
+#define Serial_TX 27
+#define Serial_BAUD 9600
+
+TinyGsm modem(Serial2);
+TinyGsmClient gsmClient(modem);
+PubSubClient client(gsmClient);
+
+unsigned long lastMsg = 0;
+#define MSG_BUFFER_SIZE (200)
+char msg[MSG_BUFFER_SIZE];
+
+// ---------------------------
+// Telemetry data structure
+// ---------------------------
+struct TelemetryData {
+  unsigned long timestamp_ms; // milliseconds from boot
+  int rpm;
+  float speed;
+  float motorTemp;
+  float voltage;
+  float current;
+};
+
+TelemetryData gokartData;
+
+// ---------------------------
+// Gokart constants
+// ---------------------------
+float wheel_diameter_m = 0.3;
+float gear_ratio = 5.0;
+
+// ------------------------------------
+// CAN COMMANDS & UTILITIES
+// ------------------------------------
+typedef enum {
+    CAN_PACKET_SET_DUTY = 0,
+    CAN_PACKET_SET_CURRENT,
+    CAN_PACKET_SET_CURRENT_BRAKE,
+    CAN_PACKET_SET_RPM,
+    CAN_PACKET_SET_POS,
+    CAN_PACKET_SET_CURRENT_REL = 10,
+    CAN_PACKET_SET_CURRENT_BRAKE_REL,
+    CAN_PACKET_SET_CURRENT_HANDBRAKE,
+    CAN_PACKET_SET_CURRENT_HANDBRAKE_REL,
+    CAN_PACKET_MAKE_ENUM_32_BITS = 0xFFFFFFFF,
+} CAN_PACKET_ID;
+
+void buffer_append_int16(uint8_t* buffer, int16_t number, int32_t *index) {
+    buffer[(*index)++] = number >> 8;
+    buffer[(*index)++] = number;
+}
+void buffer_append_int32(uint8_t* buffer, int32_t number, int32_t *index) {
+    buffer[(*index)++] = number >> 24;
+    buffer[(*index)++] = number >> 16;
+    buffer[(*index)++] = number >> 8;
+    buffer[(*index)++] = number;
+}
+void buffer_append_float16(uint8_t* buffer, float number, float scale, int32_t *index) {
+    buffer_append_int16(buffer, (int16_t)(number * scale), index);
+}
+void buffer_append_float32(uint8_t* buffer, float number, float scale, int32_t *index) {
+    buffer_append_int32(buffer, (int32_t)(number * scale), index);
+}
+
+void can_transmit_eid(uint32_t id, const uint8_t *data, uint8_t len) {
+    CAN.sendMsgBuf(id, 1, len, (unsigned char*)data);
+}
+void comm_can_set_rpm(uint8_t controller_id, float rpm) {
+    int32_t send_index = 0;
+    uint8_t buffer[4];
+    buffer_append_int32(buffer, (int32_t)rpm, &send_index);
+    can_transmit_eid(controller_id | ((uint32_t)CAN_PACKET_SET_RPM << 8), buffer, send_index);
+}
+void comm_can_set_duty(uint8_t controller_id, float duty) {
+    int32_t send_index = 0;
+    uint8_t buffer[4];
+    buffer_append_int32(buffer, (int32_t)(duty * 100000.0), &send_index);
+    can_transmit_eid(controller_id | ((uint32_t)CAN_PACKET_SET_DUTY << 8), buffer, send_index);
+}
+// ---------------------------
+// Function Prototypes
+// ---------------------------
+void setup_gsm();
+void reconnect_mqtt();
+void callback(char* topic, byte* payload, unsigned int length);
+void send_telemetry();
+void read_can_data();
+
+// ------------------------------------
+// SETUP
+// ------------------------------------
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(Serial_BAUD, SERIAL_8N1, Serial_RX, Serial_TX);
+
+  while (CAN_OK != CAN.begin(MCP_ANY, CAN_500KBPS, MCP_8MHZ)) {
+    Serial.println("CAN BUS init failed, retrying...");
+    delay(500);
+  }
+  Serial.println("CAN BUS init ok!");
+
+  setup_gsm();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+}
+
+// ------------------------------------
+// MAIN LOOP
+// ------------------------------------
+void loop() {
+  if (!modem.isNetworkConnected()) {
+    setup_gsm();
+  }
+  
+  if (!client.connected()) {
+    reconnect_mqtt();
+  }
+  client.loop();
+
+  unsigned long now = millis();
+  if (now - lastMsg > 100) {
+    lastMsg = now;
+    read_can_data();
+    send_telemetry();
+  }
+}
+
+// ------------------------------------
+// GSM SETUP
+// ------------------------------------
+void setup_gsm() {
+  Serial.println("Initializing modem...");
+  modem.restart();
+  
+  String modemInfo = modem.get
+  ModemInfo();
+  Serial.print("Modem: ");
+  Serial.println(modemInfo);
+
+  Serial.print("Waiting for network...");
+  if (!modem.waitForNetwork()) {
+    Serial.println(" failed!");
+    delay(10000);
+    return;
+  }
+  Serial.println(" ok");
+
+  Serial.print("Connecting to ");
+  Serial.print(gsm_apn);
+  if (!modem.gprsConnect(gsm_apn, gsm_user, gsm_pass)) {
+    Serial.println(" failed!");
+    delay(10000);
+    return;
+  }
+  Serial.println(" ok");
+}
+
+// ------------------------------------
+// MQTT reconnect
+// ------------------------------------
+void reconnect_mqtt() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    String clientId = "ESP32GokartClient-";
+    clientId += String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
+      Serial.println("connected");
+      client.subscribe(command_topic);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" retry in 5s");
+      delay(5000);
+    }
+  }
+}
+
+// ------------------------------------
+// MQTT callback
+// ------------------------------------
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("MQTT Message [");
+  Serial.print(topic);
+  Serial.print("] ");
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+    message += (char)payload[i];
+  }
+  Serial.println();
+
+  if (String(topic) == command_topic) {
+    uint8_t controller_id = 1; 
+    if (message.startsWith("RPM:")) {
+      float rpm = message.substring(4).toFloat();
+      comm_can_set_rpm(controller_id, rpm);
+      Serial.print("Sending RPM command: ");
+      Serial.println(rpm);
+    } else if (message.startsWith("DUTY:")) {
+      float duty = message.substring(5).toFloat();
+      comm_can_set_duty(controller_id, duty);
+      Serial.print("Sending DUTY command: ");
+      Serial.println(duty);
+    }
+  }
+}
+
+// ------------------------------------
+// READ CAN DATA from VESC
+// ------------------------------------
+void read_can_data() {
+  long unsigned int rxId;
+  unsigned char len = 0;
+  unsigned char rxBuf[8];
+
+  while (CAN_MSGAVAIL == CAN.checkReceive()) {
+    CAN.readMsgBuf(&rxId, &len, rxBuf);
+
+    int VESC_ID = 1;
+    int STATUS = 0x090 + VESC_ID;
+    int STATUS_2 = 0x091 + VESC_ID;
+    int STATUS_3 = 0x092 + VESC_ID;
+
+    if (rxId == STATUS) {
+      int32_t rpm = ((int32_t)rxBuf[0] << 24) | ((int32_t)rxBuf[1] << 16) | ((int32_t)rxBuf[2] << 8) | (int32_t)rxBuf[3];
+      int16_t current = ((int16_t)rxBuf[4] << 8) | rxBuf[5];
+      
+      gokartData.rpm = rpm;
+      gokartData.current = current / 10.0;
+    }
+    else if (rxId == STATUS_2) {
+      int16_t tempMos = ((int16_t)rxBuf[0] << 8) | rxBuf[1];
+      int16_t tempMot = ((int16_t)rxBuf[2] << 8) | rxBuf[3];
+      
+      gokartData.motorTemp = tempMot / 10.0;
+    }
+    else if (rxId == STATUS_3) {
+      int32_t battVoltage = ((int32_t)rxBuf[2] << 24) | ((int32_t)rxBuf[3] << 16) | ((int32_t)rxBuf[4] << 8) | (int32_t)rxBuf[5];
+      
+      gokartData.voltage = battVoltage / 100.0;
+    }
+  }
+
+  float wheel_circumference = wheel_diameter_m * 3.1416;
+  float motor_rps = gokartData.rpm / 60.0;
+  float wheel_rps = motor_rps / gear_ratio;
+  gokartData.speed = wheel_rps * wheel_circumference;
+}
+
+// ------------------------------------
+// SEND TELEMETRY via MQTT
+// ------------------------------------
+void send_telemetry() {
+  gokartData.timestamp_ms = millis();
+
+  snprintf(msg, MSG_BUFFER_SIZE, "%s,%lu,%d,%.2f,%.2f,%.2f,%.2f",
+           gokart_id,
+           gokartData.timestamp_ms,
+           gokartData.rpm,
+           gokartData.speed,
+           gokartData.motorTemp,
+           gokartData.voltage,
+           gokartData.current);
+
+  Serial.print("Publishing: ");
+  Serial.println(msg);
+  client.publish(telemetry_topic, msg);
+}
